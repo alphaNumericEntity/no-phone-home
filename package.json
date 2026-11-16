@@ -1,0 +1,55 @@
+{
+  "name": "no-phone-home",
+  "version": "0.1.0",
+  "description": "Fail CI when a web page can contact hosts you didn't allow. Checks the Content-Security-Policy a page actually serves, not just one page load.",
+  "keywords": [
+    "content-security-policy",
+    "csp",
+    "privacy",
+    "security",
+    "third-party",
+    "tracking",
+    "ci",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "alphaNumericEntity",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alphaNumericEntity/no-phone-home.git"
+  },
+  "homepage": "https://github.com/alphaNumericEntity/no-phone-home#readme",
+  "bugs": "https://github.com/alphaNumericEntity/no-phone-home/issues",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "no-phone-home": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "integration": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm run integration && npm run build"
+  },
+  "dependencies": {
+    "parse5": "^8.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
