@@ -2,6 +2,8 @@
 
 Fail CI when a web page can contact a host you didn't allow.
 
+![no-phone-home failing a page whose policy lets it reach Segment, Google Analytics and any HTTPS host, then passing pdfairlock.com both from its policy and in a real Chromium session](docs/demo.png)
+
 "Your data never leaves your browser" is easy to write on a landing page and hard to check. Watching one page load in DevTools shows what the page did that time, not what it *can* do. The thing that decides what it can do is the Content-Security-Policy the server sends. `no-phone-home` reads that policy and reports every way it still lets the page reach another host.
 
 ```console
