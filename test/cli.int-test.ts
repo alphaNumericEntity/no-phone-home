@@ -77,9 +77,11 @@ describe("no-phone-home command", () => {
     expect(slow.out).toMatch(/ERROR: timed out/);
     expect((await run("./index.html")).code).toBe(2);
     expect((await run("--timeout", "soon", server.url("/strict"))).code).toBe(2);
+    expect((await run("--timeout", "0x10", server.url("/strict"))).code).toBe(2);
+    expect((await run("--timeout", "3000000000", server.url("/strict"))).code).toBe(2);
     expect((await run("--nope")).code).toBe(2);
     expect((await run("--wait", "500", server.url("/strict"))).err).toMatch(/--wait only applies with --browser/);
-    expect((await run("--browser", "--wait", "soon", server.url("/strict"))).err).toMatch(/--wait must be a non-negative number/);
+    expect((await run("--browser", "--wait", "soon", server.url("/strict"))).err).toMatch(/--wait must be a non-negative whole number/);
     expect((await run()).code).toBe(2);
   });
 

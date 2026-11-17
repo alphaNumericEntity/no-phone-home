@@ -15,7 +15,7 @@ Options:
   -a, --allow <host>     Allow this host too; "*.example.com" allows subdomains (repeatable)
       --browser          Also load each page in headless Chromium and report every host it contacted
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
-      --timeout <ms>     Give up on a page after this long (default 30000)
+      --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
   -h, --help             Show this help
@@ -33,10 +33,12 @@ function describeError(error: unknown): string {
   return detail ? `${failure.message}: ${detail}` : failure.message || String(error);
 }
 
+const MAX_TIMER_MS = 2_147_483_647;
+
 function positiveInteger(value: string | undefined, option: string, allowZero = false): number | string {
-  const n = Number(value);
-  if (Number.isInteger(n) && (n > 0 || (allowZero && n === 0))) return n;
-  return `${option} must be a ${allowZero ? "non-negative" : "positive"} number of milliseconds, got "${value}"`;
+  const n = /^\d+$/.test(value ?? "") ? Number(value) : NaN;
+  if (n <= MAX_TIMER_MS && (n > 0 || (allowZero && n === 0))) return n;
+  return `${option} must be a ${allowZero ? "non-negative" : "positive"} whole number of milliseconds up to ${MAX_TIMER_MS}, got "${value}"`;
 }
 
 async function main(): Promise<number> {
