@@ -1,17 +1,10 @@
-import { execFile, execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { runCli } from "./run.js";
 import { startServer, type TestServer } from "./server.js";
-
-const root = fileURLToPath(new URL("..", import.meta.url));
-const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
 let server: TestServer;
 
 beforeAll(async () => {
-  execFileSync(process.execPath, [fileURLToPath(new URL("../node_modules/typescript/bin/tsc", import.meta.url)), "-p", "tsconfig.build.json"], {
-    cwd: root,
-  });
   server = await startServer({
     "/strict": { headers: { "content-security-policy": "default-src 'self'; form-action 'self'" } },
     "/api": { headers: { "content-security-policy": "default-src 'self'; form-action 'self'; connect-src 'self' api.example.com" } },
@@ -24,17 +17,11 @@ beforeAll(async () => {
     "/none": {},
     "/hang": { hang: true },
   });
-}, 60_000);
+});
 
 afterAll(() => server.close());
 
-function run(...args: string[]): Promise<{ code: number | null; out: string; err: string }> {
-  return new Promise((resolve) => {
-    const child = execFile(process.execPath, [cli, ...args], { encoding: "utf8" }, (_error, out, err) => {
-      resolve({ code: child.exitCode, out, err });
-    });
-  });
-}
+const run = (...args: string[]) => runCli(args);
 
 describe("no-phone-home command", () => {
   it("exits 0 and prints PASS for a locked-down page", async () => {
@@ -76,6 +63,7 @@ describe("no-phone-home command", () => {
   it("prints JSON reports with --json and nothing with --quiet", async () => {
     const json = JSON.parse((await run("--json", server.url("/api"))).out);
     expect(json[0].report.findings[0]).toMatchObject({ directive: "connect-src", reaches: "api.example.com" });
+    expect(json[0]).not.toHaveProperty("browser");
     const quiet = await run("-q", server.url("/api"));
     expect(quiet).toMatchObject({ code: 1, out: "" });
   });
@@ -90,6 +78,8 @@ describe("no-phone-home command", () => {
     expect((await run("./index.html")).code).toBe(2);
     expect((await run("--timeout", "soon", server.url("/strict"))).code).toBe(2);
     expect((await run("--nope")).code).toBe(2);
+    expect((await run("--wait", "500", server.url("/strict"))).err).toMatch(/--wait only applies with --browser/);
+    expect((await run("--browser", "--wait", "soon", server.url("/strict"))).err).toMatch(/--wait must be a non-negative number/);
     expect((await run()).code).toBe(2);
   });
 
