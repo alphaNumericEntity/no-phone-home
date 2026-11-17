@@ -1,3 +1,13 @@
+export {
+  BrowserUnavailableError,
+  openRecorder,
+  recordUrl,
+  type BrowserReport,
+  type HostActivity,
+  type RecordedRequest,
+  type RecordOptions,
+  type Recorder,
+} from "./browser.js";
 export { checkResponse, checkUrl, type CheckOptions, type PageReport, type PageResponse } from "./check.js";
 export {
   ANY_HOST,
@@ -12,5 +22,5 @@ export {
   type Policy,
   type PolicySource,
 } from "./csp.js";
-export { formatReport } from "./format.js";
+export { formatBrowserReport, formatReport } from "./format.js";
 export { metaPolicies, type MetaPolicy } from "./page.js";
