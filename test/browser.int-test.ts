@@ -54,7 +54,7 @@ beforeAll(async () => {
     "/pixel.png": { headers: { "content-type": "image/png" }, body: "png" },
     "/data": { headers: { "content-type": "text/plain" }, body: "ok" },
     "/blocked": {
-      headers: { "content-security-policy": "default-src 'self' 'unsafe-inline'" },
+      headers: { "content-security-policy": "default-src 'self' 'unsafe-inline'; form-action 'self'" },
       body: html("", `<img src="http://${elsewhere}/blocked.png"><script>${calls("blocked-")}</script>`),
     },
     "/workers": {
@@ -126,16 +126,23 @@ describe.skipIf(unavailable !== undefined)("--browser", () => {
   });
 
   it("stops reporting a host once it is allowed", async () => {
+    const allowed = JSON.parse((await browser("--json", "--allow", "localhost", page.url("/leaky"))).out);
+    expect(allowed[0].browser).toMatchObject({ ok: true, contacted: [] });
+    const subdomains = JSON.parse((await browser("--json", "-a", "*.localhost", page.url("/leaky"))).out);
+    expect(subdomains[0].browser.ok).toBe(false);
+  });
+
+  it("fails when the policy fails, even if every recorded request stayed on allowed hosts", async () => {
     const { code, out } = await browser("--allow", "localhost", page.url("/leaky"));
-    expect(code).toBe(0);
+    expect(out).toContain(": FAIL: no Content-Security-Policy is enforced");
     expect(out).toContain("/leaky: PASS: in Chromium");
-    expect((await browser("-a", "*.localhost", page.url("/leaky"))).code).toBe(1);
+    expect(code).toBe(1);
   });
 
   it("prints the policy report and the recording together with --json", async () => {
     const json = JSON.parse((await browser("--json", "--wait", "100", page.url("/blocked"))).out);
     expect(Object.keys(json[0]).sort()).toEqual(["browser", "report", "url"]);
-    expect(json[0].report.findings.map((f: { directive: string }) => f.directive)).toEqual(["form-action"]);
+    expect(json[0].report).toMatchObject({ ok: true, findings: [] });
     expect(Object.keys(json[0].browser).sort()).toEqual(["blocked", "contacted", "finalUrl", "notes", "ok", "requests", "status", "url"]);
     expect(json[0].browser).toMatchObject({ ok: true, status: 200, contacted: [], notes: [] });
     expect(json[0].browser.requests.find((r: { url: string }) => r.url.endsWith("/blocked.png"))).toEqual({

@@ -63,7 +63,7 @@ https://pdfairlock.com -> https://pdfairlock.com/: PASS: the Content-Security-Po
 https://pdfairlock.com -> https://pdfairlock.com/: PASS: in Chromium, every request stayed on pdfairlock.com and the allowed hosts (406 requests)
 ```
 
-With `--browser`, the exit code comes from the recording: `1` if any request left the page's host and the allowed hosts, `0` if none did. The policy is printed for context but doesn't change it, so to fail CI on either, run the command once with `--browser` and once without.
+With `--browser`, a page passes only when both views pass: its policy keeps it on its own host and the allowed hosts, and every request it made in Chromium stayed there too. A page with no policy fails even if the recording was clean, because nothing stops it contacting other hosts later.
 
 ### Install
 
@@ -108,7 +108,7 @@ $ npx no-phone-home [options] <url>...
   -q, --quiet            Print nothing; use the exit code
 ```
 
-Exit codes: `0` every page passed, `1` a page can contact another host, `2` error. With `--browser`, a page passes when every request it made stayed on its own host and the allowed hosts.
+Exit codes: `0` every page passed, `1` a page can contact another host, `2` error. With `--browser`, a page passes only when its policy passes and every request it made stayed on its own host and the allowed hosts.
 
 With `--json`, each result has the policy `report`, and with `--browser` a `browser` report as well: `contacted` and `blocked` hosts with their counts, and every recorded request (`url`, `host`, `type`, `from`, and `blocked` or `error` where they apply).
 

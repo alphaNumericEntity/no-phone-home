@@ -22,8 +22,8 @@ Options:
   -v, --version          Show the version
 
 Exit codes: 0 = every page passed, 1 = a page can contact another host, 2 = error.
-With --browser, a page passes when every request it made in Chromium stayed on
-its own host and the allowed hosts; the policy is shown next to it.`;
+With --browser, a page passes only when its policy passes and every request it
+made in Chromium stayed on its own host and the allowed hosts.`;
 
 function describeError(error: unknown): string {
   const failure = error as Error & { cause?: Error & { code?: string; errors?: Error[] } };
@@ -126,7 +126,7 @@ async function main(): Promise<number> {
     }
   }
   if (results.some((r) => r.error)) return 2;
-  return results.some((r) => !(r.browser ?? r.report)!.ok) ? 1 : 0;
+  return results.some((r) => !r.report!.ok || r.browser?.ok === false) ? 1 : 0;
 }
 
 process.exitCode = await main();
