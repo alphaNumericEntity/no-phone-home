@@ -8,10 +8,22 @@ export {
   type RecordOptions,
   type Recorder,
 } from "./browser.js";
-export { checkResponse, checkUrl, type CheckOptions, type PageReport, type PageResponse } from "./check.js";
+export {
+  checkResponse,
+  checkUrl,
+  checkWorker,
+  checkWorkerResponse,
+  type CheckOptions,
+  type PageReport,
+  type PageResponse,
+  type WorkerKind,
+  type WorkerReport,
+} from "./check.js";
 export {
   ANY_HOST,
   CHECKED_DIRECTIVES,
+  WORKER_DIRECTIVES,
+  type CheckedDirective,
   evaluatePolicies,
   hostAllowList,
   parsePolicy,
@@ -22,5 +34,5 @@ export {
   type Policy,
   type PolicySource,
 } from "./csp.js";
-export { formatBrowserReport, formatReport } from "./format.js";
+export { formatBrowserReport, formatReport, formatWorkerReport } from "./format.js";
 export { metaPolicies, type MetaPolicy } from "./page.js";

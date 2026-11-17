@@ -2,18 +2,21 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { BrowserUnavailableError, openRecorder, type BrowserReport, type Recorder } from "./browser.js";
-import { checkUrl, type PageReport } from "./check.js";
-import { formatBrowserReport, formatReport } from "./format.js";
+import { checkUrl, checkWorker, type PageReport, type WorkerKind, type WorkerReport } from "./check.js";
+import { formatBrowserReport, formatReport, formatWorkerReport } from "./format.js";
 
 const USAGE = `Usage: no-phone-home [options] <url>...
 
 Fails when a page's Content-Security-Policy lets it contact a host other than
 its own and the ones you allow: through fetch or WebSocket, scripts, images,
-fonts, frames, workers, form submissions or violation reports.
+fonts, frames, form submissions or violation reports. Workers run under the
+policy of their own script, so each worker script is checked as well.
 
 Options:
   -a, --allow <host>     Allow this host too; "*.example.com" allows subdomains (repeatable)
-      --browser          Also load each page in headless Chromium and report every host it contacted
+  -w, --worker <path>    Also check this worker script, resolved against each page (repeatable)
+      --browser          Also load each page in headless Chromium, report every host it contacted,
+                         and check the script of every worker it started
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
       --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
       --json             Print the full reports as JSON
@@ -48,6 +51,7 @@ async function main(): Promise<number> {
       allowPositionals: true,
       options: {
         allow: { type: "string", short: "a", multiple: true },
+        worker: { type: "string", short: "w", multiple: true },
         browser: { type: "boolean", default: false },
         wait: { type: "string" },
         timeout: { type: "string", default: "30000" },
@@ -89,6 +93,13 @@ async function main(): Promise<number> {
     console.error(USAGE);
     return 2;
   }
+  for (const path of values.worker ?? []) {
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(path)?.[1]?.toLowerCase();
+    if (!path.trim() || (scheme && (!["http", "https"].includes(scheme) || !URL.canParse(path)))) {
+      console.error(`--worker must be a path or an http:// or https:// URL, got "${path}"`);
+      return 2;
+    }
+  }
 
   let recorder: Recorder | undefined;
   if (values.browser) {
@@ -101,7 +112,7 @@ async function main(): Promise<number> {
   }
 
   const allow = values.allow ?? [];
-  const results: { url: string; report?: PageReport; browser?: BrowserReport; error?: string }[] = [];
+  const results: Result[] = [];
   try {
     for (const url of positionals) {
       if (!/^https?:\/\//i.test(url)) {
@@ -110,7 +121,19 @@ async function main(): Promise<number> {
       }
       try {
         const report = await checkUrl(url, { allow, timeoutMs });
-        results.push(recorder ? { url, report, browser: await recorder.record(url, { allow, timeoutMs, waitMs }) } : { url, report });
+        const browser = recorder ? await recorder.record(url, { allow, timeoutMs, waitMs }) : undefined;
+        const found = [...(browser?.workers ?? []), ...(values.worker ?? []).map((path) => ({ url: new URL(path, report.finalUrl).href, kind: "worker" as const }))];
+        const workers: WorkerResult[] = [];
+        for (const { kind, url: href } of found) {
+          const worker = { kind, url: href.replace(/#.*$/, "") };
+          if (workers.some((w) => w.url === worker.url)) continue;
+          try {
+            workers.push({ url: worker.url, kind: worker.kind, report: await checkWorker(worker.url, worker.kind, { allow, timeoutMs }) });
+          } catch (error) {
+            workers.push({ url: worker.url, kind: worker.kind, error: describeError(error) });
+          }
+        }
+        results.push({ url, report, ...(browser ? { browser } : {}), ...(workers.length ? { workers } : {}) });
       } catch (error) {
         results.push({ url, error: describeError(error) });
       }
@@ -123,12 +146,32 @@ async function main(): Promise<number> {
     console.log(JSON.stringify(results, null, 2));
   } else if (!values.quiet) {
     for (const r of results) {
-      if (!r.report) console.log(`${r.url}: ERROR: ${r.error}`);
-      else console.log(r.browser ? `${formatReport(r.report)}\n${formatBrowserReport(r.browser)}` : formatReport(r.report));
+      if (!r.report) {
+        console.log(`${r.url}: ERROR: ${r.error}`);
+        continue;
+      }
+      const parts = [formatReport(r.report), ...(r.browser ? [formatBrowserReport(r.browser)] : [])];
+      for (const w of r.workers ?? []) parts.push(w.report ? formatWorkerReport(w.report) : `${w.url} (${w.kind}): ERROR: ${w.error}`);
+      console.log(parts.join("\n"));
     }
   }
-  if (results.some((r) => r.error)) return 2;
-  return results.some((r) => !r.report!.ok || r.browser?.ok === false) ? 1 : 0;
+  if (results.some((r) => r.error || r.workers?.some((w) => w.error))) return 2;
+  return results.some((r) => !r.report!.ok || r.browser?.ok === false || r.workers?.some((w) => !w.report!.ok)) ? 1 : 0;
+}
+
+interface WorkerResult {
+  url: string;
+  kind: WorkerKind;
+  report?: WorkerReport;
+  error?: string;
+}
+
+interface Result {
+  url: string;
+  report?: PageReport;
+  browser?: BrowserReport;
+  workers?: WorkerResult[];
+  error?: string;
 }
 
 process.exitCode = await main();

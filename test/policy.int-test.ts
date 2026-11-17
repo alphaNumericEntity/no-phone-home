@@ -144,11 +144,11 @@ describe("pages that can contact other hosts", () => {
   });
 
   it("follows the fallback chain: script-src covers script elements", async () => {
-    expect(reaches(await check("/fallback-chain"))).toEqual({ "script-src-elem": ["cdn.example.org"] });
+    expect(reaches(await check("/fallback-chain"))).toEqual({ "script-src-elem": ["cdn.example.org"], "worker-src": ["cdn.example.org"] });
   });
 
-  it("follows frame-src to child-src", async () => {
-    expect(reaches(await check("/child-src"))).toEqual({ "frame-src": ["frames.example.org"] });
+  it("follows frame-src and worker-src to child-src", async () => {
+    expect(reaches(await check("/child-src"))).toEqual({ "frame-src": ["frames.example.org"], "worker-src": ["frames.example.org"] });
   });
 
   it("treats 'strict-dynamic' as letting scripts load from any host", async () => {

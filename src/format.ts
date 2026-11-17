@@ -1,5 +1,5 @@
 import type { BrowserReport, HostActivity } from "./browser.js";
-import type { PageReport } from "./check.js";
+import type { PageReport, WorkerReport } from "./check.js";
 import { ANY_HOST, type Finding } from "./csp.js";
 
 const SHOWN_HOSTS = 4;
@@ -26,16 +26,33 @@ export function formatReport(report: PageReport): string {
   } else if (report.policies.length === 0) {
     lines.push(`${shown}: FAIL: no Content-Security-Policy is enforced, so the page can contact any host`);
   } else {
-    lines.push(`${shown}: FAIL: the page can contact hosts outside the allowlist`);
-    const byDirective = new Map<string, Finding[]>();
-    for (const finding of report.findings) byDirective.set(finding.directive, [...(byDirective.get(finding.directive) ?? []), finding]);
-    for (const [directive, findings] of byDirective) {
-      lines.push(`  ${directive} (${findings[0]!.governs}): ${hostList(findings)}`);
-    }
+    lines.push(`${shown}: FAIL: the page can contact hosts outside the allowlist`, ...findingLines(report.findings));
   }
   if (report.status >= 400) lines.push(`  note: the server answered HTTP ${report.status}`);
   for (const text of report.reportOnly) lines.push(`  note: report-only policy is not enforced: ${text}`);
   for (const warning of report.warnings) lines.push(`  warning: ${warning}`);
+  return lines.join("\n");
+}
+
+function findingLines(findings: Finding[]): string[] {
+  const byDirective = new Map<string, Finding[]>();
+  for (const finding of findings) byDirective.set(finding.directive, [...(byDirective.get(finding.directive) ?? []), finding]);
+  return [...byDirective].map(([directive, group]) => `  ${directive} (${group[0]!.governs}): ${hostList(group)}`);
+}
+
+export function formatWorkerReport(report: WorkerReport): string {
+  const origin = new URL(report.finalUrl).host;
+  const shown = `${report.finalUrl === report.url ? report.url : `${report.url} -> ${report.finalUrl}`} (${report.kind})`;
+  const lines: string[] = [];
+
+  if (report.ok) {
+    lines.push(`${shown}: PASS: the worker's own Content-Security-Policy keeps its requests on ${origin} and the allowed hosts`);
+  } else if (report.policies.length === 0) {
+    lines.push(`${shown}: FAIL: the script is served without a Content-Security-Policy, so the ${report.kind} can contact any host`);
+  } else {
+    lines.push(`${shown}: FAIL: the ${report.kind} can contact hosts outside the allowlist`, ...findingLines(report.findings));
+  }
+  for (const text of report.reportOnly) lines.push(`  note: report-only policy is not enforced: ${text}`);
   return lines.join("\n");
 }
 

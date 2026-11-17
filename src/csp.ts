@@ -15,10 +15,17 @@ export interface Finding {
   via: string[];
 }
 
+export interface CheckedDirective {
+  name: string;
+  chain: string[];
+  governs: string;
+}
+
 export interface EvaluateOptions {
   pageUrl: string;
   allow?: string[];
   reportingEndpoints?: Map<string, string>;
+  directives?: CheckedDirective[];
 }
 
 const META_IGNORED = new Set(["report-uri", "report-to", "frame-ancestors", "sandbox"]);
@@ -27,7 +34,9 @@ const NETWORK_SCHEMES = new Set(["http", "https", "ws", "wss", "ftp"]);
 
 const SCRIPT_DIRECTIVES = new Set(["script-src-elem", "script-src", "default-src"]);
 
-export const CHECKED_DIRECTIVES: { name: string; chain: string[]; governs: string }[] = [
+const WORKER_SRC_CHAIN = ["worker-src", "child-src", "script-src", "default-src"];
+
+export const CHECKED_DIRECTIVES: CheckedDirective[] = [
   { name: "connect-src", chain: ["connect-src", "default-src"], governs: "fetch, XHR, WebSocket, EventSource and sendBeacon" },
   { name: "script-src-elem", chain: ["script-src-elem", "script-src", "default-src"], governs: "scripts" },
   { name: "style-src-elem", chain: ["style-src-elem", "style-src", "default-src"], governs: "stylesheets" },
@@ -38,6 +47,14 @@ export const CHECKED_DIRECTIVES: { name: string; chain: string[]; governs: strin
   { name: "object-src", chain: ["object-src", "default-src"], governs: "<object> and <embed>" },
   { name: "manifest-src", chain: ["manifest-src", "default-src"], governs: "the web app manifest" },
   { name: "form-action", chain: ["form-action"], governs: "form submissions" },
+  { name: "worker-src", chain: WORKER_SRC_CHAIN, governs: "static imports in module workers, in Chromium" },
+];
+
+export const WORKER_DIRECTIVES: CheckedDirective[] = [
+  { name: "connect-src", chain: ["connect-src", "default-src"], governs: "fetch, XHR, WebSocket and EventSource" },
+  { name: "script-src-elem", chain: ["script-src-elem", "script-src", "default-src"], governs: "importScripts and import()" },
+  { name: "worker-src", chain: WORKER_SRC_CHAIN, governs: "static imports in module workers, in Firefox and Safari" },
+  { name: "font-src", chain: ["font-src", "default-src"], governs: "web fonts" },
 ];
 
 export function parsePolicy(text: string, source: PolicySource): Policy {
@@ -130,7 +147,7 @@ function reachesOf(sources: string[], scriptLike: boolean, allowed: (host: strin
 function directiveReaches(policy: Policy, chain: string[], allowed: (host: string) => boolean): Reach[] {
   for (const name of chain) {
     const sources = policy.directives.get(name);
-    if (sources) return reachesOf(sources, SCRIPT_DIRECTIVES.has(name) && chain[0] === "script-src-elem", allowed);
+    if (sources) return reachesOf(sources, SCRIPT_DIRECTIVES.has(name) && (chain[0] === "script-src-elem" || chain[0] === "worker-src"), allowed);
   }
   return [{ reaches: ANY_HOST, via: `no ${chain[0]} directive` }];
 }
@@ -166,7 +183,7 @@ export function evaluatePolicies(policies: Policy[], options: EvaluateOptions): 
   const allowed = hostAllowList(options.pageUrl, options.allow);
   const findings: Finding[] = [];
 
-  for (const directive of CHECKED_DIRECTIVES) {
+  for (const directive of options.directives ?? CHECKED_DIRECTIVES) {
     if (policies.length === 0) {
       findings.push({ directive: directive.name, governs: directive.governs, reaches: ANY_HOST, via: ["no Content-Security-Policy"] });
       continue;

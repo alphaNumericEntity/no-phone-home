@@ -33,6 +33,7 @@ It fetches each URL, then reads the policies from the `Content-Security-Policy` 
 | `object-src` | `<object>` and `<embed>` |
 | `manifest-src` | the web app manifest |
 | `form-action` | form submissions |
+| `worker-src` | static imports in module workers, in Chromium (see [Workers](#workers)) |
 | `report-uri`, `report-to` | where violation reports are sent |
 
 Its rules follow what browsers actually do:
@@ -44,6 +45,32 @@ Its rules follow what browsers actually do:
 - **Report-only policies.** `Content-Security-Policy-Report-Only` is listed, but it doesn't count, because it blocks nothing.
 
 Hosts are compared by name. The page's own host is always allowed. `--allow *.example.com` allows every subdomain of `example.com`, but not `example.com` itself.
+
+## Workers
+
+A worker started from a URL doesn't run under the page's policy. That covers dedicated workers, shared workers and service workers, including workers started by other workers. Each runs under the policy sent with its own script. A page with `connect-src 'self'` can therefore register a service worker that sends data anywhere, if `sw.js` is served without a policy. Chromium, Firefox and WebKit all behave this way. A worker created from a `blob:` or `data:` URL inherits the page's policy, so the page check already covers it.
+
+Name worker scripts with `--worker` (each path is resolved against each page), or let `--browser` find every worker the page starts:
+
+```console
+$ npx no-phone-home --worker /sw.js https://pdfairlock.com
+https://pdfairlock.com -> https://pdfairlock.com/: PASS: the Content-Security-Policy keeps every request on pdfairlock.com and the allowed hosts
+https://pdfairlock.com/sw.js (worker): PASS: the worker's own Content-Security-Policy keeps its requests on pdfairlock.com and the allowed hosts
+```
+
+A worker can't load images, frames or stylesheets, or submit forms, so a worker's script is checked only for what it can request:
+
+| Directive | Covers in a worker |
+|---|---|
+| `connect-src` | fetch, XHR, WebSocket and EventSource |
+| `script-src-elem` | `importScripts` and `import()` |
+| `worker-src` | static imports in module workers, in Firefox and Safari |
+| `font-src` | fonts loaded with `FontFace` |
+| `report-uri`, `report-to` | where violation reports are sent |
+
+Static `import` statements in a module worker are the odd case. Firefox and Safari check them against the worker's own `worker-src` (falling back to `child-src`, `script-src`, then `default-src`), and Chromium checks them against the page's. So `worker-src` is checked in both places.
+
+The server's response is what's checked, so `--worker` reports an error, rather than a result, for a script that a browser wouldn't run as a worker: one that is missing, redirects to another origin, or comes back as an HTML page (a mistyped path on a site that serves its app for every URL, for example).
 
 ## Browser mode
 
@@ -65,7 +92,7 @@ https://pdfairlock.com -> https://pdfairlock.com/: PASS: the Content-Security-Po
 https://pdfairlock.com -> https://pdfairlock.com/: PASS: in Chromium, every request stayed on pdfairlock.com and the allowed hosts (406 requests)
 ```
 
-With `--browser`, a page passes only when both views pass: its policy keeps it on its own host and the allowed hosts, and every request it made in Chromium stayed there too. A page with no policy fails even if the recording was clean, because nothing stops it contacting other hosts later.
+With `--browser`, a page passes only when both views pass: its policy keeps it on its own host and the allowed hosts, and every request it made in Chromium stayed there too. A page with no policy fails even if the recording was clean, because nothing stops it contacting other hosts later. Every worker the page started is also checked against its own policy, as [above](#workers), and has to pass too.
 
 ### Install
 
@@ -92,8 +119,8 @@ Each host other than the page's own (and the host of the URL you gave, if it red
 
 - **Anything after the wait.** It sees one load with no clicks or typing. A request made later, or only after interaction, isn't recorded.
 - **Beacons sent while the page is being left.** Chromium sends a beacon fired on `pagehide`, `visibilitychange` or `unload` after the page is gone, and Playwright never reports it. The policy check covers these: `connect-src` governs `sendBeacon` at any time.
-- **Shared workers.** Playwright doesn't expose them, so their requests are missed. A page that starts one also keeps Chromium from reporting the network as idle, so recording stops at `--timeout` with a note.
-- **WebSockets opened by service workers.** Playwright reports WebSockets only for pages, so one a service worker opens is missed. Its `fetch` requests are recorded.
+- **Requests from shared workers.** Playwright doesn't expose them, so their requests are missed, though the shared worker's own policy is still checked. A page that starts one also keeps Chromium from reporting the network as idle, so recording stops at `--timeout` with a note.
+- **WebSockets opened by service workers.** Playwright reports WebSockets only for pages, so one a service worker opens is missed. Its `fetch` requests are recorded, and its policy's `connect-src` is checked.
 - **Refusals inside workers.** A worker's own policy can refuse a request. That request isn't counted as contacted, which is correct, but it isn't listed as blocked either.
 - **Connections that aren't requests.** `<link rel="preconnect">` and `dns-prefetch` hints, and WebRTC, aren't recorded. A CORS preflight isn't listed separately, but the request it was for is.
 - **What other visitors see.** It runs one headless Chromium from your machine. A site can serve other browsers, regions or signed-in users different content. Scripts that wait for a cookie banner to be accepted don't run.
@@ -104,25 +131,30 @@ Each host other than the page's own (and the host of the URL you gave, if it red
 $ npx no-phone-home [options] <url>...
 
   -a, --allow <host>     Allow this host too; "*.example.com" allows subdomains (repeatable)
-      --browser          Also load each page in headless Chromium and report every host it contacted
+  -w, --worker <path>    Also check this worker script, resolved against each page (repeatable)
+      --browser          Also load each page in headless Chromium, report every host it contacted,
+                         and check the script of every worker it started
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
       --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
 ```
 
-Exit codes: `0` every page passed, `1` a page can contact another host, `2` error. With `--browser`, a page passes only when its policy passes and every request it made stayed on its own host and the allowed hosts.
+Exit codes: `0` every page passed, `1` a page or one of its workers can contact another host, `2` error (including a worker script that can't be fetched). With `--browser`, a page passes only when its policy passes and every request it made stayed on its own host and the allowed hosts.
 
-With `--json`, each result has the policy `report`, and with `--browser` a `browser` report as well: `contacted` and `blocked` hosts with their counts, and every recorded request (`url`, `host`, `type`, `from`, and `blocked` or `error` where they apply).
+With `--json`, each result has the policy `report`, and with `--browser` a `browser` report as well: `contacted` and `blocked` hosts with their counts, every recorded request (`url`, `host`, `type`, `from`, and `blocked` or `error` where they apply), and the `workers` it started. Worker checks are in `workers`, each with its `url`, `kind`, and a `report` or an `error`.
 
 ## Library
 
 ```js
-import { checkUrl, evaluatePolicies, parsePolicyList, recordUrl } from "no-phone-home";
+import { checkUrl, checkWorker, evaluatePolicies, parsePolicyList, recordUrl } from "no-phone-home";
 
 const report = await checkUrl("https://app.example.com", { allow: ["api.example.com"] });
 report.ok; // false
 report.findings; // [{ directive: "connect-src", reaches: "any host", via: ["https:"], governs: "..." }]
+
+const worker = await checkWorker("https://app.example.com/sw.js", "service worker");
+worker.ok; // false when sw.js is served without a policy
 
 const policies = parsePolicyList("default-src 'self'; form-action 'self'", "header");
 evaluatePolicies(policies, { pageUrl: "https://app.example.com" }); // []
@@ -138,12 +170,12 @@ recording.contacted; // [{ host: "www.google-analytics.com", requests: 2, types:
 The policy is only one piece. The limits of browser mode are listed [above](#what-it-doesnt-record).
 
 - **Navigation.** No CSP directive can stop a script from changing `location` or opening a window to another site.
-- **Workers.** A service worker or web worker gets its own policy, from the headers on its script, and this version doesn't check it yet.
+- **Finding workers without a browser.** Without `--browser`, only the worker scripts you name with `--worker` are checked.
+- **Responses a service worker makes up.** Once installed, a service worker can answer later visits with pages and scripts it builds itself and leave the server's policy off them, so those visits can reach hosts the checked policy forbids. Only the responses the server sends are checked.
 - **Policies set by JavaScript.** Only the server's response is read, so a meta tag that a script inserts later is not seen.
 
 ## Roadmap
 
-- Check the policy each service worker and web worker actually gets.
 - Serve a static build folder and crawl its pages, so it can run before anything is deployed.
 - Click through each page so that requests made after interaction are caught too.
 - A GitHub Action.

@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { checkWorker } from "../src/index.js";
 import { runCli } from "./run.js";
 import { startServer, type TestServer } from "./server.js";
 
+const JS = { "content-type": "text/javascript" };
+
 let server: TestServer;
+let elsewhere: TestServer;
 
 beforeAll(async () => {
+  elsewhere = await startServer({ "/worker.js": { headers: { ...JS, "content-security-policy": "default-src 'self'" } } });
   server = await startServer({
     "/strict": { headers: { "content-security-policy": "default-src 'self'; form-action 'self'" } },
     "/api": { headers: { "content-security-policy": "default-src 'self'; form-action 'self'; connect-src 'self' api.example.com" } },
@@ -16,10 +21,17 @@ beforeAll(async () => {
     },
     "/none": {},
     "/hang": { hang: true },
+    "/open-worker.js": { headers: JS },
+    "/strict-worker.js": { headers: { ...JS, "content-security-policy": "default-src 'self'" } },
+    "/moved-worker.js": { status: 302, headers: { location: `http://localhost:${elsewhere.port}/worker.js` }, body: "" },
+    "/module-imports": { headers: { "content-security-policy": "default-src 'self'; form-action 'self'; worker-src 'self' modules.example.com" } },
+    "/module-worker.js": { headers: { ...JS, "content-security-policy": "default-src 'self'; worker-src 'self' modules.example.com" } },
+    "/text-worker.js": { headers: { "content-type": "text/plain", "content-security-policy": "default-src 'self'" } },
+    "/api-worker.js": { headers: { ...JS, "content-security-policy": "default-src 'self'; connect-src 'self' api.example.com; report-uri https://reports.example.com/csp" } },
   });
 });
 
-afterAll(() => server.close());
+afterAll(() => Promise.all([server.close(), elsewhere.close()]));
 
 const run = (...args: string[]) => runCli(args);
 
@@ -83,6 +95,73 @@ describe("no-phone-home command", () => {
     expect((await run("--wait", "500", server.url("/strict"))).err).toMatch(/--wait only applies with --browser/);
     expect((await run("--browser", "--wait", "soon", server.url("/strict"))).err).toMatch(/--wait must be a non-negative whole number/);
     expect((await run()).code).toBe(2);
+  });
+
+  it("checks a worker script against its own policy, not the page's", async () => {
+    const open = await run("--worker", "/open-worker.js", server.url("/strict"));
+    expect(open.code).toBe(1);
+    expect(open.out).toContain("/strict: PASS");
+    expect(open.out).toContain(`${server.url("/open-worker.js")} (worker): FAIL: the script is served without a Content-Security-Policy, so the worker can contact any host\n`);
+
+    const strict = await run("-w", "strict-worker.js", server.url("/strict"));
+    expect(strict.code).toBe(0);
+    expect(strict.out).toContain(`${server.url("/strict-worker.js")} (worker): PASS: the worker's own Content-Security-Policy keeps its requests on 127.0.0.1`);
+  });
+
+  it("checks only what a worker can request, and its violation reports", async () => {
+    const { code, out } = await run("--worker", "/api-worker.js", server.url("/strict"));
+    expect(code).toBe(1);
+    expect(out).toContain(
+      "(worker): FAIL: the worker can contact hosts outside the allowlist\n" +
+        "  connect-src (fetch, XHR, WebSocket and EventSource): api.example.com\n" +
+        "  report-uri (violation reports): reports.example.com\n",
+    );
+    expect((await run("-a", "api.example.com", "-a", "reports.example.com", "-w", "/api-worker.js", server.url("/strict"))).code).toBe(0);
+    const json = JSON.parse((await run("--json", "-w", "/api-worker.js", server.url("/strict"))).out);
+    expect(json[0].workers).toEqual([
+      {
+        url: server.url("/api-worker.js"),
+        kind: "worker",
+        report: expect.objectContaining({ ok: false, status: 200, findings: [expect.objectContaining({ directive: "connect-src", reaches: "api.example.com" }), expect.anything()] }),
+      },
+    ]);
+  });
+
+  it("exits 2 when a worker script is missing", async () => {
+    const { code, out } = await run("--worker", "/gone.js", server.url("/strict"));
+    expect(code).toBe(2);
+    expect(out).toContain(`${server.url("/gone.js")} (worker): ERROR: the server answered HTTP 404\n`);
+  });
+
+  it("checks static imports in module workers against worker-src, on the page and in the worker", async () => {
+    const page = await run("--json", server.url("/module-imports"));
+    expect(JSON.parse(page.out)[0].report.findings).toEqual([expect.objectContaining({ directive: "worker-src", reaches: "modules.example.com" })]);
+    const worker = await run("--json", "-w", "/module-worker.js", server.url("/strict"));
+    expect(JSON.parse(worker.out)[0].workers[0].report.findings).toEqual([expect.objectContaining({ directive: "worker-src", reaches: "modules.example.com" })]);
+  });
+
+  it("refuses an HTML page and odd --worker values instead of passing them", async () => {
+    const html = await run("--worker", "/strict", server.url("/strict"));
+    expect(html.code).toBe(2);
+    expect(html.out).toContain(`${server.url("/strict")} (worker): ERROR: the server answered with a "text/html" page, not a script\n`);
+    for (const value of ["", "data:text/javascript,1", "http://["]) {
+      const bad = await run("--worker", value, server.url("/strict"));
+      expect(bad.code).toBe(2);
+      expect(bad.err).toContain(`--worker must be a path or an http:// or https:// URL, got "${value}"`);
+    }
+    const twice = JSON.parse((await run("--json", "-w", "/strict-worker.js", "-w", "/strict-worker.js#x", server.url("/strict"))).out);
+    expect(twice[0].workers).toHaveLength(1);
+  });
+
+  it("refuses worker scripts that browsers would refuse to run", async () => {
+    const moved = await run("--worker", "/moved-worker.js", server.url("/strict"));
+    expect(moved.code).toBe(2);
+    expect(moved.out).toContain(`(worker): ERROR: the script redirects to http://localhost:${elsewhere.port}, and browsers don't run a worker from another origin\n`);
+    expect(elsewhere.hits("/worker.js")).toBe(1);
+    await expect(checkWorker(server.url("/text-worker.js"), "service worker")).rejects.toThrow(
+      'a service worker script must be served as JavaScript, and this one is served as "text/plain"',
+    );
+    expect((await checkWorker(server.url("/text-worker.js"), "worker")).ok).toBe(true);
   });
 
   it("prints its version", async () => {

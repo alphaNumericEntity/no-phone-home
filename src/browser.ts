@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import type { Browser, BrowserContext, Request, WebSocket } from "playwright-core";
+import type { Browser, BrowserContext, CDPSession, Request, WebSocket } from "playwright-core";
+import type { WorkerKind } from "./check.js";
 import { hostAllowList } from "./csp.js";
 
 export interface RecordOptions {
@@ -33,6 +34,7 @@ export interface BrowserReport {
   contacted: HostActivity[];
   blocked: HostActivity[];
   requests: RecordedRequest[];
+  workers: { url: string; kind: WorkerKind }[];
   notes: string[];
 }
 
@@ -147,17 +149,22 @@ function mergeViolations(requests: RecordedRequest[], violations: { url: string;
   return merged;
 }
 
-async function recordInContext(context: BrowserContext, url: string, options: RecordOptions): Promise<BrowserReport> {
+async function recordInContext(context: BrowserContext, targets: CDPSession, url: string, options: RecordOptions): Promise<BrowserReport> {
   const timeout = options.timeoutMs ?? 30_000;
   const seen = new Map<Request, RecordedRequest>();
   const sockets: RecordedRequest[] = [];
   const violations: { url: string; directive: string }[] = [];
   const notes: string[] = [];
+  const workers = new Map<string, WorkerKind>();
+  const addWorker = (url: string, kind: WorkerKind) => {
+    if (/^https?:\/\//i.test(url) && !workers.has(url)) workers.set(url, kind);
+  };
 
   await context.exposeBinding(VIOLATION_BINDING, (_source, violation: { url: string; directive: string }) => {
     violations.push({ url: String(violation.url), directive: String(violation.directive) });
   });
   await context.addInitScript({ content: VIOLATION_LISTENER });
+  context.on("serviceworker", (worker) => addWorker(worker.url(), "service worker"));
 
   context.on("request", (request) => {
     const host = networkHost(request.url());
@@ -178,23 +185,41 @@ async function recordInContext(context: BrowserContext, url: string, options: Re
     sockets.push(recorded);
     socket.on("socketerror", (error) => (recorded.error = error));
   };
-  context.on("page", (page) => page.on("websocket", watchSockets));
+  context.on("page", (page) => {
+    page.on("websocket", watchSockets);
+    page.on("worker", (worker) => addWorker(worker.url(), "worker"));
+  });
 
   const page = await context.newPage();
+  const session = await context.newCDPSession(page);
+  const { targetInfo } = await session.send("Target.getTargetInfo");
+  await session.detach();
+  const onTarget = ({ targetInfo: target }: { targetInfo: { type: string; url: string; browserContextId?: string } }) => {
+    if (target.type === "shared_worker" && target.browserContextId === targetInfo.browserContextId) addWorker(target.url, "shared worker");
+  };
+  targets.on("Target.targetCreated", onTarget);
+  targets.on("Target.targetInfoChanged", onTarget);
+
   let response;
   try {
-    response = await page.goto(url, { waitUntil: "load", timeout });
-  } catch (error) {
-    throw firstLine(error);
+    try {
+      response = await page.goto(url, { waitUntil: "load", timeout });
+    } catch (error) {
+      throw firstLine(error);
+    }
+    try {
+      await page.waitForLoadState("networkidle", { timeout });
+    } catch {
+      notes.push(
+        `Chromium didn't report the network as idle within ${timeout} ms of the page loading, so recording stopped there (a redirect the policy blocked, or a shared worker, can cause this)`,
+      );
+    }
+    if (options.waitMs) await page.waitForTimeout(options.waitMs);
+  } finally {
+    targets.off("Target.targetCreated", onTarget);
+    targets.off("Target.targetInfoChanged", onTarget);
   }
-  try {
-    await page.waitForLoadState("networkidle", { timeout });
-  } catch {
-    notes.push(
-      `Chromium didn't report the network as idle within ${timeout} ms of the page loading, so recording stopped there (a redirect the policy blocked, or a shared worker, can cause this)`,
-    );
-  }
-  if (options.waitMs) await page.waitForTimeout(options.waitMs);
+  for (const worker of context.serviceWorkers()) addWorker(worker.url(), "service worker");
 
   const finalUrl = response?.url() ?? page.url();
   const requestedHost = networkHost(url);
@@ -211,17 +236,26 @@ async function recordInContext(context: BrowserContext, url: string, options: Re
     contacted,
     blocked: summarize(others.filter((request) => request.blocked)),
     requests,
+    workers: [...workers].map(([url, kind]) => ({ url, kind })),
     notes,
   };
 }
 
 export async function openRecorder(): Promise<Recorder> {
   const browser = await launch();
+  let targets: CDPSession;
+  try {
+    targets = await browser.newBrowserCDPSession();
+    await targets.send("Target.setDiscoverTargets", { discover: true });
+  } catch (error) {
+    await browser.close();
+    throw firstLine(error);
+  }
   return {
     async record(url, options = {}) {
       const context = await browser.newContext();
       try {
-        return await recordInContext(context, url, options);
+        return await recordInContext(context, targets, url, options);
       } finally {
         await context.close();
       }

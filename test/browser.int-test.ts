@@ -69,6 +69,25 @@ beforeAll(async () => {
       headers: JS,
       body: `self.addEventListener("install", (event) => event.waitUntil(fetch("http://${elsewhere}/from-service-worker")));`,
     },
+    "/worker-policies": {
+      headers: { "content-security-policy": "default-src 'self' 'unsafe-inline' blob:; form-action 'self'" },
+      body: html(
+        `<base href="/app/">`,
+        `<script>
+          new Worker("/strict-worker.js");
+          new SharedWorker("shared-worker.js");
+          new Worker(URL.createObjectURL(new Blob(["1"], { type: "text/javascript" })));
+          navigator.serviceWorker.register("/open-service-worker.js");
+        </script><img src="/worker-gate.png">`,
+      ),
+    },
+    "/strict-worker.js": { headers: { ...JS, "content-security-policy": "default-src 'self'" }, body: "" },
+    "/app/shared-worker.js": { headers: JS, body: "" },
+    "/open-service-worker.js": { headers: JS, body: "" },
+    "/worker-gate.png": {
+      headers: { "content-type": "image/png" },
+      before: () => Promise.all(["/strict-worker.js", "/app/shared-worker.js", "/open-service-worker.js"].map((path) => page.waitForHit(path))),
+    },
     "/never-loads": { body: html("", `<img src="/hang">`) },
     "/hang": { hang: true },
     "/gate.png": {
@@ -125,6 +144,21 @@ describe.skipIf(unavailable !== undefined)("--browser", () => {
     expect(json[0].browser.contacted[0].types).toEqual({ fetch: 2, "fetch from a service worker": 1 });
   });
 
+  it("checks the script of every worker the page starts against the worker's own policy", async () => {
+    const { code, out } = await browser("--timeout", "4000", page.url("/worker-policies"));
+    expect(code).toBe(1);
+    expect(out).toContain("note: Chromium didn't report the network as idle within 4000 ms");
+    expect(out).toContain("/worker-policies: PASS: the Content-Security-Policy keeps every request");
+    expect(out).toContain(`${page.url("/strict-worker.js")} (worker): PASS: the worker's own Content-Security-Policy`);
+    expect(out).toContain(`${page.url("/app/shared-worker.js")} (shared worker): FAIL: the script is served without a Content-Security-Policy, so the shared worker can contact any host`);
+    expect(out).toContain(`${page.url("/open-service-worker.js")} (service worker): FAIL: the script is served without a Content-Security-Policy`);
+    expect(out).not.toContain("blob:");
+
+    const json = JSON.parse((await browser("--json", "--timeout", "4000", page.url("/worker-policies"))).out);
+    const workers = json[0].workers.map((w: { url: string; kind: string; report: { ok: boolean } }) => `${new URL(w.url).pathname} ${w.kind} ${w.report.ok}`);
+    expect(workers.sort()).toEqual(["/app/shared-worker.js shared worker false", "/open-service-worker.js service worker false", "/strict-worker.js worker true"]);
+  });
+
   it("stops reporting a host once it is allowed", async () => {
     const allowed = JSON.parse((await browser("--json", "--allow", "localhost", page.url("/leaky"))).out);
     expect(allowed[0].browser).toMatchObject({ ok: true, contacted: [] });
@@ -143,8 +177,8 @@ describe.skipIf(unavailable !== undefined)("--browser", () => {
     const json = JSON.parse((await browser("--json", "--wait", "100", page.url("/blocked"))).out);
     expect(Object.keys(json[0]).sort()).toEqual(["browser", "report", "url"]);
     expect(json[0].report).toMatchObject({ ok: true, findings: [] });
-    expect(Object.keys(json[0].browser).sort()).toEqual(["blocked", "contacted", "finalUrl", "notes", "ok", "requests", "status", "url"]);
-    expect(json[0].browser).toMatchObject({ ok: true, status: 200, contacted: [], notes: [] });
+    expect(Object.keys(json[0].browser).sort()).toEqual(["blocked", "contacted", "finalUrl", "notes", "ok", "requests", "status", "url", "workers"]);
+    expect(json[0].browser).toMatchObject({ ok: true, status: 200, contacted: [], workers: [], notes: [] });
     expect(json[0].browser.requests.find((r: { url: string }) => r.url.endsWith("/blocked.png"))).toEqual({
       url: `http://${elsewhere}/blocked.png`,
       host: "localhost",
