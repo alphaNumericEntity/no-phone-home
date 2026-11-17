@@ -190,7 +190,9 @@ async function recordInContext(context: BrowserContext, url: string, options: Re
   try {
     await page.waitForLoadState("networkidle", { timeout });
   } catch {
-    notes.push(`the network was still busy ${timeout} ms after the page loaded`);
+    notes.push(
+      `Chromium didn't report the network as idle within ${timeout} ms of the page loading, so recording stopped there (a redirect the policy blocked, or a shared worker, can cause this)`,
+    );
   }
   if (options.waitMs) await page.waitForTimeout(options.waitMs);
 

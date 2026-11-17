@@ -81,8 +81,8 @@ Without Chromium, or with optional dependencies left out, `--browser` exits `2` 
 
 It waits for the page's `load` event and for the network to go quiet, then for `--wait <ms>` more if you set it. Everything Chromium reports in that time counts, from the page, its iframes, pop-ups, dedicated workers and service workers:
 
-- the page itself and any redirects, scripts, stylesheets, images, fonts, audio and video, the manifest;
-- `fetch`, XHR, `EventSource`, WebSocket connections, `navigator.sendBeacon` and violation reports.
+- the page itself and any redirects, scripts, stylesheets, images, fonts, audio and video, prefetches and preloads;
+- `fetch`, XHR, `EventSource`, WebSocket connections (except from service workers, see below), `navigator.sendBeacon` and `report-uri` violation reports.
 
 Each host other than the page's own (and the host of the URL you gave, if it redirected) and the `--allow` hosts is listed with its request count by type. Requests that went out and then failed still count, because they reached the network. Requests the Content-Security-Policy refused are listed separately as blocked: the browser never sent them. Those refusals come from Chromium's failed-request events and from `securitypolicyviolation` events in the page and its frames, so a refused `fetch`, beacon or WebSocket is reported under the directive that refused it (`connect-src`).
 
@@ -90,7 +90,8 @@ Each host other than the page's own (and the host of the URL you gave, if it red
 
 - **Anything after the wait.** It sees one load with no clicks or typing. A request made later, or only after interaction, isn't recorded.
 - **Beacons sent while the page is being left.** Chromium sends a beacon fired on `pagehide`, `visibilitychange` or `unload` after the page is gone, and Playwright never reports it. The policy check covers these: `connect-src` governs `sendBeacon` at any time.
-- **Shared workers.** Playwright doesn't expose them, so their requests are missed.
+- **Shared workers.** Playwright doesn't expose them, so their requests are missed. A page that starts one also keeps Chromium from reporting the network as idle, so recording stops at `--timeout` with a note.
+- **WebSockets opened by service workers.** Playwright reports WebSockets only for pages, so one a service worker opens is missed. Its `fetch` requests are recorded.
 - **Refusals inside workers.** A worker's own policy can refuse a request. That request isn't counted as contacted, which is correct, but it isn't listed as blocked either.
 - **Connections that aren't requests.** `<link rel="preconnect">` and `dns-prefetch` hints, and WebRTC, aren't recorded. A CORS preflight isn't listed separately, but the request it was for is.
 - **What other visitors see.** It runs one headless Chromium from your machine. A site can serve other browsers, regions or signed-in users different content. Scripts that wait for a cookie banner to be accepted don't run.
@@ -103,7 +104,7 @@ $ npx no-phone-home [options] <url>...
   -a, --allow <host>     Allow this host too; "*.example.com" allows subdomains (repeatable)
       --browser          Also load each page in headless Chromium and report every host it contacted
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
-      --timeout <ms>     Give up on a page after this long (default 30000)
+      --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
 ```
