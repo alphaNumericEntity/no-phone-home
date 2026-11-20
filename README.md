@@ -125,10 +125,37 @@ Each host other than the page's own (and the host of the URL you gave, if it red
 - **Connections that aren't requests.** `<link rel="preconnect">` and `dns-prefetch` hints, and WebRTC, aren't recorded. A CORS preflight isn't listed separately, but the request it was for is.
 - **What other visitors see.** It runs one headless Chromium from your machine. A site can serve other browsers, regions or signed-in users different content. Scripts that wait for a cookie banner to be accepted don't run.
 
+## Before you deploy
+
+`--serve <folder>` checks a static build before it goes live. It serves the folder on `127.0.0.1`, adds the headers your host's config would add, and checks every `.html` page in it. `--worker`, `--browser` and the other options work as they do for URLs:
+
+```console
+$ npx no-phone-home --serve out --headers vercel.json --worker /sw.js
+Serving out at http://127.0.0.1:61158 with the headers from vercel.json
+http://127.0.0.1:61158/: PASS: the Content-Security-Policy keeps every request on 127.0.0.1:61158 and the allowed hosts
+http://127.0.0.1:61158/sw.js (worker): PASS: the worker's own Content-Security-Policy keeps its requests on 127.0.0.1:61158 and the allowed hosts
+...
+Checked 39 pages: 39 passed, 0 failed
+```
+
+The header rules come from `--headers <file>`, or from a `_headers` file in the folder when there is one:
+
+- **`vercel.json`.** The `headers` rules apply in order, and a later rule that sets the same header replaces the earlier value, as in the Vercel CLI's `vercel dev` router. `source` patterns are matched with path-to-regexp 6.3 and the options Vercel uses (case-sensitive, no optional trailing slash), and `:name` segments are filled into header names and values. Vercel matches with path-to-regexp 6.1, and the two differ only when one segment holds two parameters, such as `/:a-:b`. `cleanUrls` and `trailingSlash` decide the URL each page is checked at: with `cleanUrls`, `about.html` is checked at `/about`. A rule with a `has` or `missing` condition is skipped with a note, because those conditions depend on the visitor's request.
+- **`_headers`** (Cloudflare Pages, Netlify). The file is read the way Cloudflare's own parser reads it. The rules apply in order. A header that two rules set gets both values, joined with a comma, so two `Content-Security-Policy` rules both apply. `! Name` removes a header an earlier rule set, before the rule adds its own. `*` and `:placeholder` work as on Cloudflare Pages. Lines Cloudflare ignores are ignored here too, each with a note: a line over 2,000 characters (a long `Content-Security-Policy` is the usual one), every rule after the 100th, and malformed lines. Pages are checked at extensionless URLs (`/about`, `/docs/`), the way Cloudflare Pages serves them. A rule for a full URL (`https://example.com/*`) is skipped with a note.
+- **No config.** Only `<meta>` policies are checked, and a note says so. `netlify.toml` is not read.
+
+Notes are printed to stderr before the results, and not with `--quiet`.
+
+Two things to know:
+
+- **The page's own host is `127.0.0.1`.** A policy that names the production host, such as `connect-src https://example.com`, needs `--allow example.com` to pass locally. On the live site that host is the page's own.
+- **Only the config file is read.** Headers your host adds by itself, or that the app sets at runtime (Next.js middleware, `headers()` in `next.config.js`), aren't seen. Check the deployed URL as well.
+
 ## Command line
 
 ```console
 $ npx no-phone-home [options] <url>...
+$ npx no-phone-home [options] --serve <folder>
 
   -a, --allow <host>     Allow this host too; "*.example.com" allows subdomains (repeatable)
   -w, --worker <path>    Also check this worker script, resolved against each page (repeatable)
@@ -136,6 +163,9 @@ $ npx no-phone-home [options] <url>...
                          and check the script of every worker it started
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
       --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
+      --serve <folder>   Serve a static build folder locally and check every .html page in it
+      --headers <file>   With --serve, the host's header rules: a vercel.json or a _headers file
+                         (default: the folder's _headers file, if it has one)
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
 ```
@@ -165,6 +195,16 @@ recording.contacted; // [{ host: "www.google-analytics.com", requests: 2, types:
 
 `recordUrl` launches Chromium for one page. To record several pages, use `openRecorder()`, call its `record()` once per page, then call `close()`.
 
+```js
+import { checkUrl, serveDirectory } from "no-phone-home";
+
+const site = await serveDirectory("out", { headers: "vercel.json" });
+for (const path of site.pages) console.log((await checkUrl(site.url + path)).ok);
+await site.close();
+```
+
+`site.notes` lists the rules that were skipped.
+
 ## Limits
 
 The policy is only one piece. The limits of browser mode are listed [above](#what-it-doesnt-record).
@@ -173,10 +213,10 @@ The policy is only one piece. The limits of browser mode are listed [above](#wha
 - **Finding workers without a browser.** Without `--browser`, only the worker scripts you name with `--worker` are checked.
 - **Responses a service worker makes up.** Once installed, a service worker can answer later visits with pages and scripts it builds itself and leave the server's policy off them, so those visits can reach hosts the checked policy forbids. Only the responses the server sends are checked.
 - **Policies set by JavaScript.** Only the server's response is read, so a meta tag that a script inserts later is not seen.
+- **Hosts' header rules.** `--serve` follows Vercel's header rules and Cloudflare Pages' documented `_headers` rules. Netlify's docs don't say how overlapping `_headers` rules combine, so a Netlify site's live headers can differ. Check the deployed URL too.
 
 ## Roadmap
 
-- Serve a static build folder and crawl its pages, so it can run before anything is deployed.
 - Click through each page so that requests made after interaction are caught too.
 - A GitHub Action.
 
