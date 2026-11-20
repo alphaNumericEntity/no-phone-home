@@ -4,8 +4,10 @@ import { parseArgs } from "node:util";
 import { BrowserUnavailableError, openRecorder, type BrowserReport, type Recorder } from "./browser.js";
 import { checkUrl, checkWorker, type PageReport, type WorkerKind, type WorkerReport } from "./check.js";
 import { formatBrowserReport, formatReport, formatWorkerReport } from "./format.js";
+import { serveDirectory, type ServedSite } from "./serve.js";
 
 const USAGE = `Usage: no-phone-home [options] <url>...
+       no-phone-home [options] --serve <folder>
 
 Fails when a page's Content-Security-Policy lets it contact a host other than
 its own and the ones you allow: through fetch or WebSocket, scripts, images,
@@ -19,6 +21,9 @@ Options:
                          and check the script of every worker it started
       --wait <ms>        With --browser, keep recording this long after the network goes idle (default 0)
       --timeout <ms>     Give up on a page after this long (default 30000); with --browser, it applies to each step
+      --serve <folder>   Serve a static build folder locally and check every .html page in it
+      --headers <file>   With --serve, the host's header rules: a vercel.json or a _headers file
+                         (default: the folder's _headers file, if it has one)
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
   -h, --help             Show this help
@@ -55,6 +60,8 @@ async function main(): Promise<number> {
         browser: { type: "boolean", default: false },
         wait: { type: "string" },
         timeout: { type: "string", default: "30000" },
+        serve: { type: "string" },
+        headers: { type: "string" },
         json: { type: "boolean", default: false },
         quiet: { type: "boolean", short: "q", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -89,7 +96,15 @@ async function main(): Promise<number> {
     console.error("--wait only applies with --browser");
     return 2;
   }
-  if (positionals.length === 0) {
+  if (values.headers !== undefined && values.serve === undefined) {
+    console.error("--headers only applies with --serve");
+    return 2;
+  }
+  if (values.serve !== undefined && positionals.length > 0) {
+    console.error("--serve checks the pages in a folder; pass either --serve or URLs, not both");
+    return 2;
+  }
+  if (values.serve === undefined && positionals.length === 0) {
     console.error(USAGE);
     return 2;
   }
@@ -101,12 +116,33 @@ async function main(): Promise<number> {
     }
   }
 
+  let site: ServedSite | undefined;
+  if (values.serve !== undefined) {
+    try {
+      site = await serveDirectory(values.serve, values.headers === undefined ? {} : { headers: values.headers });
+    } catch (error) {
+      console.error((error as Error).message);
+      return 2;
+    }
+    if (site.pages.length === 0) {
+      console.error(`${values.serve} has no .html files`);
+      await site.close();
+      return 2;
+    }
+    if (!values.quiet) {
+      console.error(`Serving ${values.serve} at ${site.url}${site.config ? ` with the headers from ${site.config}` : ""}`);
+      for (const note of site.notes) console.error(`note: ${note}`);
+    }
+  }
+  const urls = site ? site.pages.map((path) => site.url + path) : positionals;
+
   let recorder: Recorder | undefined;
   if (values.browser) {
     try {
       recorder = await openRecorder();
     } catch (error) {
       console.error(error instanceof BrowserUnavailableError ? error.message : `Chromium failed to start: ${describeError(error)}`);
+      await site?.close();
       return 2;
     }
   }
@@ -114,7 +150,7 @@ async function main(): Promise<number> {
   const allow = values.allow ?? [];
   const results: Result[] = [];
   try {
-    for (const url of positionals) {
+    for (const url of urls) {
       if (!/^https?:\/\//i.test(url)) {
         results.push({ url, error: "expected an http:// or https:// URL" });
         continue;
@@ -140,6 +176,7 @@ async function main(): Promise<number> {
     }
   } finally {
     await recorder?.close();
+    await site?.close();
   }
 
   if (values.json) {
@@ -154,9 +191,25 @@ async function main(): Promise<number> {
       for (const w of r.workers ?? []) parts.push(w.report ? formatWorkerReport(w.report) : `${w.url} (${w.kind}): ERROR: ${w.error}`);
       console.log(parts.join("\n"));
     }
+    if (site) console.log(summary(results));
   }
-  if (results.some((r) => r.error || r.workers?.some((w) => w.error))) return 2;
-  return results.some((r) => !r.report!.ok || r.browser?.ok === false || r.workers?.some((w) => !w.report!.ok)) ? 1 : 0;
+  if (results.some(hasError)) return 2;
+  return results.every(passed) ? 0 : 1;
+}
+
+function hasError(r: Result): boolean {
+  return Boolean(r.error || r.workers?.some((w) => w.error));
+}
+
+function passed(r: Result): boolean {
+  return r.report!.ok && r.browser?.ok !== false && !r.workers?.some((w) => !w.report!.ok);
+}
+
+function summary(results: Result[]): string {
+  const errors = results.filter(hasError).length;
+  const failed = results.filter((r) => !hasError(r) && !passed(r)).length;
+  const pages = `${results.length} page${results.length === 1 ? "" : "s"}`;
+  return `Checked ${pages}: ${results.length - failed - errors} passed, ${failed} failed${errors ? `, ${errors} with errors` : ""}`;
 }
 
 interface WorkerResult {
