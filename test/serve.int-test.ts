@@ -55,7 +55,8 @@ describe("--serve with a vercel.json", () => {
       }),
     });
     const { code, byPath, paths, err } = await json("--serve", dir, "--headers", join(config, "vercel.json"));
-    expect(paths).toEqual(["/", "/about", "/docs", "/docs/api", "/open"]);
+    expect(paths).toEqual(["/", "/about", "/docs", "/docs/api", "/open", "/open/"]);
+    expect(byPath["/open/"]!.ok).toBe(true);
     expect(code).toBe(1);
     expect(byPath["/open"]!.policies.map((p) => p.text)).toEqual([OPEN]);
     expect(byPath["/about"]!.ok).toBe(true);
@@ -90,12 +91,51 @@ describe("--serve with a vercel.json", () => {
     expect(byPath["/content-security-policy/"]!.policies.map((p) => p.text)).toEqual([STRICT]);
   });
 
+  it("also checks the other slash form when trailingSlash is unset and its headers differ", async () => {
+    const dir = await folder({ "index.html": page(), "docs/index.html": page(), "about.html": page(), "same.html": page() });
+    const config = await folder({
+      "vercel.json": vercel({
+        cleanUrls: true,
+        headers: [
+          { source: "/(.*)", headers: [{ key: "Content-Security-Policy", value: STRICT }] },
+          { source: "/about/", headers: [{ key: "Content-Security-Policy", value: OPEN }] },
+          { source: "/docs", headers: [{ key: "Content-Security-Policy", value: OPEN }] },
+        ],
+      }),
+    });
+    const { code, byPath, paths, err } = await json("--serve", dir, "--headers", join(config, "vercel.json"));
+    expect(paths).toEqual(["/", "/about", "/about/", "/docs", "/docs/", "/same"]);
+    expect(byPath["/about"]!.ok).toBe(true);
+    expect(byPath["/about/"]!.ok).toBe(false);
+    expect(byPath["/docs"]!.ok).toBe(false);
+    expect(byPath["/docs/"]!.ok).toBe(true);
+    expect(code).toBe(1);
+    expect(err).toContain("/about is also served at /about/, with different policy headers, so both are checked");
+  });
+
   it("says when two files are served at the same clean URL", async () => {
     const dir = await folder({ "about.html": page(), "about/index.html": page() });
     const config = await folder({ "vercel.json": vercel({ cleanUrls: true }) });
     const { paths, err } = await json("--serve", dir, "--headers", join(config, "vercel.json"));
     expect(paths).toEqual(["/about"]);
-    expect(err).toContain("about.html and about/index.html would both be served at /about; only about.html is checked");
+    expect(err).toContain("about.html and about/index.html would both be served at /about; only about.html is checked there");
+  });
+
+  it("checks the literal index.html path when cleanUrls is off and only its policy differs", async () => {
+    const dir = await folder({ "index.html": page(), "docs/index.html": page(), "cached/index.html": page() });
+    const config = await folder({
+      "vercel.json": vercel({
+        trailingSlash: true,
+        headers: [
+          { source: "/(.*)", headers: [{ key: "Content-Security-Policy", value: STRICT }] },
+          { source: "/docs/index.html", headers: [{ key: "Content-Security-Policy", value: OPEN }] },
+          { source: "/cached/index.html", headers: [{ key: "Cache-Control", value: "no-store" }] },
+        ],
+      }),
+    });
+    const { byPath, paths } = await json("--serve", dir, "--headers", join(config, "vercel.json"));
+    expect(paths).toEqual(["/", "/cached/", "/docs/", "/docs/index.html"]);
+    expect(byPath["/docs/index.html"]!.ok).toBe(false);
   });
 
   it("skips a rule with a has or missing condition and says so", async () => {
@@ -169,7 +209,7 @@ describe("--serve with a _headers file", () => {
   });
 
   it("reads the file the way Cloudflare's parser does", async () => {
-    const filler = Array.from({ length: 96 }, (_, i) => `/filler-${i}\n  X-Filler: ${i}`);
+    const filler = Array.from({ length: 97 }, (_, i) => `/filler-${i}\n  X-Filler: ${i}`);
     const dir = await folder({
       _headers: [
         "X-Stray: before any path",
@@ -204,7 +244,74 @@ describe("--serve with a _headers file", () => {
     expect(err).toContain('_headers line 1: "X-Stray: before any path" comes before any path, so it is ignored');
     expect(err).toContain('_headers line 11: expected "Name: value" or "! Name", got "!Content-Security-Policy"');
     expect(err).toContain("_headers line 13 is longer than 2000 characters");
-    expect(err).toContain("_headers line 206: Cloudflare reads at most 100 rules");
+    expect(err).toContain("_headers line 208: Cloudflare stops reading after 101 rules");
+  });
+});
+
+describe("--serve --host netlify", () => {
+  it("lets a later rule replace a header and matches paths as Netlify does", async () => {
+    const dir = await folder({
+      _headers: [
+        "/*",
+        `  Content-Security-Policy: ${STRICT}`,
+        "/Blog/*",
+        `  Content-Security-Policy: ${OPEN}`,
+        "/legacy",
+        "  ! Content-Security-Policy",
+      ].join("\n"),
+      "index.html": page(),
+      "blog/index.html": page(),
+      "blog/first.html": page(),
+      "legacy.html": page(),
+    });
+    const netlify = await json("--serve", dir, "--host", "netlify");
+    expect(netlify.byPath["/blog/"]!.policies.map((p) => p.text)).toEqual([OPEN]);
+    expect(netlify.byPath["/blog/first"]!.policies.map((p) => p.text)).toEqual([OPEN]);
+    expect(netlify.byPath["/legacy"]!.ok).toBe(true);
+    expect(netlify.err).toContain('"! Content-Security-Policy" has no colon, so Netlify ignores it');
+    const cloudflare = await json("--serve", dir);
+    expect(cloudflare.byPath["/blog/first"]!.policies.map((p) => p.text)).toEqual([STRICT]);
+    expect(cloudflare.byPath["/legacy"]!.policies).toEqual([]);
+  });
+
+  it("sends the header Netlify sends when names differ only in case, and keeps regex characters around *", async () => {
+    const dir = await folder({
+      _headers: [
+        "/*",
+        `  Content-Security-Policy: ${STRICT}`,
+        "/blog/*",
+        `  content-security-policy: ${OPEN}`,
+        "/blog/x",
+        `  Content-Security-Policy: ${STRICT}`,
+        "/v1.*",
+        `  Content-Security-Policy: ${OPEN}`,
+        "/bad",
+        "  X Foo: bar",
+      ].join("\n"),
+      "blog/x.html": page(),
+      "v1x2.html": page(),
+      "bad.html": page(),
+    });
+    const { byPath, err } = await json("--serve", dir, "--host", "netlify");
+    expect(byPath["/blog/x"]!.policies.map((p) => p.text)).toEqual([OPEN]);
+    expect(byPath["/v1x2"]!.policies.map((p) => p.text)).toEqual([OPEN]);
+    expect(byPath["/bad"]!.ok).toBe(true);
+    expect(err).toContain('_headers line 10: "X Foo: bar" is not a valid HTTP header, so it is ignored');
+  });
+
+  it("rejects --host without a _headers file or with a vercel.json", async () => {
+    const dir = await folder({ "index.html": page() });
+    const config = await folder({ "vercel.json": vercel({}) });
+    for (const [args, message] of [
+      [["--serve", dir, "--host", "netlify"], "--host netlify needs a _headers file"],
+      [["--serve", dir, "--host", "netlify", "--headers", join(config, "vercel.json")], "--host applies to a _headers file, not to vercel.json"],
+      [["--serve", dir, "--host", "github"], '--host must be "cloudflare" or "netlify", got "github"'],
+      [["--host", "netlify", "https://example.com"], "--host only applies with --serve"],
+    ] as const) {
+      const { code, err } = await runCli([...args]);
+      expect(code, message).toBe(2);
+      expect(err).toContain(message);
+    }
   });
 });
 

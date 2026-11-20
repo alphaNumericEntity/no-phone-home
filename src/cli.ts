@@ -24,6 +24,7 @@ Options:
       --serve <folder>   Serve a static build folder locally and check every .html page in it
       --headers <file>   With --serve, the host's header rules: a vercel.json or a _headers file
                          (default: the folder's _headers file, if it has one)
+      --host <host>      With --serve, read a _headers file as "cloudflare" (default) or "netlify" does
       --json             Print the full reports as JSON
   -q, --quiet            Print nothing; use the exit code
   -h, --help             Show this help
@@ -62,6 +63,7 @@ async function main(): Promise<number> {
         timeout: { type: "string", default: "30000" },
         serve: { type: "string" },
         headers: { type: "string" },
+        host: { type: "string" },
         json: { type: "boolean", default: false },
         quiet: { type: "boolean", short: "q", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -96,8 +98,14 @@ async function main(): Promise<number> {
     console.error("--wait only applies with --browser");
     return 2;
   }
-  if (values.headers !== undefined && values.serve === undefined) {
-    console.error("--headers only applies with --serve");
+  for (const option of ["headers", "host"] as const) {
+    if (values[option] !== undefined && values.serve === undefined) {
+      console.error(`--${option} only applies with --serve`);
+      return 2;
+    }
+  }
+  if (values.host !== undefined && values.host !== "cloudflare" && values.host !== "netlify") {
+    console.error(`--host must be "cloudflare" or "netlify", got "${values.host}"`);
     return 2;
   }
   if (values.serve !== undefined && positionals.length > 0) {
@@ -119,7 +127,10 @@ async function main(): Promise<number> {
   let site: ServedSite | undefined;
   if (values.serve !== undefined) {
     try {
-      site = await serveDirectory(values.serve, values.headers === undefined ? {} : { headers: values.headers });
+      site = await serveDirectory(values.serve, {
+        ...(values.headers === undefined ? {} : { headers: values.headers }),
+        ...(values.host === undefined ? {} : { host: values.host }),
+      });
     } catch (error) {
       console.error((error as Error).message);
       return 2;

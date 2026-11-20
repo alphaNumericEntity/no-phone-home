@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, validateHeaderName, validateHeaderValue } from "node:http";
 import type { AddressInfo } from "node:net";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
@@ -6,6 +6,7 @@ import { pathToRegexp, type Key } from "path-to-regexp";
 
 export interface ServeOptions {
   headers?: string;
+  host?: HeadersFileHost;
 }
 
 export interface ServedSite {
@@ -21,8 +22,11 @@ type HeaderList = [string, string][];
 interface HeaderConfig {
   headersFor(pathname: string): HeaderList;
   style: UrlStyle;
+  alternates?(file: string, page: string): string[];
   notes: string[];
 }
+
+export type HeadersFileHost = "cloudflare" | "netlify";
 
 interface UrlStyle {
   stripHtml: boolean;
@@ -60,6 +64,16 @@ const CONTENT_TYPES: Record<string, string> = {
   ".mp4": "video/mp4",
   ".webm": "video/webm",
 };
+
+function headerProblem(name: string, value: string): string | undefined {
+  try {
+    validateHeaderName(name);
+    validateHeaderValue(name, value);
+    return undefined;
+  } catch {
+    return `"${name}: ${value.length > 40 ? `${value.slice(0, 40)}...` : value}" is not a valid HTTP header`;
+  }
+}
 
 function substitute(value: string, names: (string | number)[], match: RegExpExecArray): string {
   return value.replace(/:([A-Za-z_]\w*)/g, (text, name: string) => {
@@ -101,12 +115,23 @@ function vercelConfig(text: string, file: string): HeaderConfig {
     } catch (error) {
       throw new Error(`${where}.source "${source}" is not a valid pattern: ${(error as Error).message}`);
     }
-    rules.push({ regex, names: keys.map((k) => k.name), headers: list.map((h: { key: string; value: string }) => [h.key, h.value]) });
+    const valid = list.filter((h: { key: string; value: string }) => {
+      const problem = h.key.includes(":") ? undefined : headerProblem(h.key, h.value);
+      if (problem) notes.push(`${where}: ${problem}, so it is not applied`);
+      return !problem;
+    });
+    rules.push({ regex, names: keys.map((k) => k.name), headers: valid.map((h: { key: string; value: string }) => [h.key, h.value]) });
   });
 
   return {
     notes,
     style: { stripHtml: cleanUrls, dirSlash: trailingSlash ?? !cleanUrls, fileSlash: cleanUrls && trailingSlash === true },
+    alternates(file, page) {
+      const forms: string[] = [];
+      if (trailingSlash === undefined && page !== "/" && !page.endsWith(".html")) forms.push(page.endsWith("/") ? page.slice(0, -1) : `${page}/`);
+      if (!cleanUrls && (file === "index.html" || file.endsWith("/index.html"))) forms.push(`/${file.split("/").map(encodeURIComponent).join("/")}`);
+      return forms;
+    },
     headersFor(pathname) {
       const out = new Map<string, [string, string]>();
       for (const rule of rules) {
@@ -125,6 +150,8 @@ function vercelConfig(text: string, file: string): HeaderConfig {
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+const POLICY_HEADERS = new Set(["content-security-policy", "content-security-policy-report-only", "reporting-endpoints"]);
 
 const MAX_RULES = 100;
 const MAX_LINE_LENGTH = 2000;
@@ -167,8 +194,8 @@ function headersFileConfig(text: string, file: string): HeaderConfig {
       continue;
     }
     if (/^([^\s]+:\/\/|\/)/.test(line)) {
-      if (parsed.filter((rule) => rule.set.size || rule.unset.length).length >= MAX_RULES) {
-        notes.push(`${where}: Cloudflare reads at most ${MAX_RULES} rules, so this rule and the rest of the file are ignored`);
+      if (parsed.slice(0, -1).filter((rule) => rule.set.size || rule.unset.length).length >= MAX_RULES) {
+        notes.push(`${where}: Cloudflare stops reading after ${MAX_RULES + 1} rules (its docs say ${MAX_RULES}), so this rule and the rest of the file are ignored`);
         break;
       }
       current = { path: line, set: new Map(), unset: [] };
@@ -189,6 +216,11 @@ function headersFileConfig(text: string, file: string): HeaderConfig {
     const value = line.slice(colon + 1).trim();
     if (!name || name.includes(" ") || !value) {
       notes.push(`${where}: "${line}" is not a valid "Name: value" line, so it is ignored`);
+      continue;
+    }
+    const problem = headerProblem(name, value);
+    if (problem) {
+      notes.push(`${where}: ${problem}, so it is ignored`);
       continue;
     }
     const existing = current.set.get(name);
@@ -233,11 +265,82 @@ function headersFileConfig(text: string, file: string): HeaderConfig {
   };
 }
 
+function netlifyPattern(path: string): RegExp {
+  const parts = path
+    .split("/")
+    .map((part) => part.trimEnd())
+    .filter(Boolean)
+    .map((part) => {
+      if (part.startsWith(":")) return "([^/]+)";
+      if (part === "*") return "?(.*)";
+      if (part.includes("*")) return part.replaceAll("*", "(.*)");
+      return escapeRegex(part);
+    });
+  return new RegExp(`^/${parts.join("/")}/?$`, "iu");
+}
+
+function netlifyHeadersConfig(text: string, file: string): HeaderConfig {
+  const notes: string[] = [];
+  const rules: { regex: RegExp | undefined; values: Map<string, string> }[] = [];
+  for (const [i, raw] of text.split("\n").entries()) {
+    const where = `${file} line ${i + 1}`;
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("/")) {
+      let regex: RegExp | undefined;
+      try {
+        regex = netlifyPattern(line);
+      } catch {
+        notes.push(`${where}: "${line}" is not a pattern Netlify can match, so the rule is ignored`);
+      }
+      rules.push({ regex, values: new Map() });
+      continue;
+    }
+    const colon = line.indexOf(":");
+    if (colon === -1) {
+      notes.push(`${where}: "${line}" has no colon, so Netlify ignores it${line.startsWith("!") ? " (Netlify has no \"!\" to remove a header)" : ""}`);
+      continue;
+    }
+    const name = line.slice(0, colon).trim();
+    const value = line.slice(colon + 1).trim();
+    const rule = rules.at(-1);
+    if (!name || !value || !rule) {
+      notes.push(`${where}: "${line}" is ${rule ? "missing a header name or value" : "before any path"}, so Netlify ignores it`);
+      continue;
+    }
+    const problem = headerProblem(name, value);
+    if (problem) {
+      notes.push(`${where}: ${problem}, so it is ignored`);
+      continue;
+    }
+    const existing = rule.values.get(name);
+    rule.values.set(name, existing === undefined ? value : `${existing}, ${value}`);
+  }
+  for (const rule of rules) {
+    if (rule.values.has("undefined")) {
+      notes.push(`${file}: a rule sets a header named "undefined", so Netlify drops the whole rule`);
+      rule.regex = undefined;
+    }
+    for (const [name, value] of rule.values) rule.values.set(name, value.split(/\s*,\s*/g).join(", "));
+  }
+  return {
+    notes,
+    style: CLOUDFLARE_STYLE,
+    headersFor(pathname) {
+      const merged = new Map<string, string>();
+      for (const { regex, values } of rules) if (regex?.test(pathname)) for (const [name, value] of values) merged.set(name, value);
+      const out = new Map<string, [string, string]>();
+      for (const [name, value] of merged) out.set(name.toLowerCase(), [name, value]);
+      return [...out.values()];
+    },
+  };
+}
+
 async function isFile(path: string): Promise<boolean> {
   return (await stat(path).catch(() => undefined))?.isFile() ?? false;
 }
 
-async function loadConfig(dir: string, file: string | undefined): Promise<{ config: HeaderConfig | null; path: string | null }> {
+async function loadConfig(dir: string, file: string | undefined, host: HeadersFileHost | undefined): Promise<{ config: HeaderConfig | null; path: string | null }> {
   const path = file ?? join(dir, "_headers");
   if (!file && !(await isFile(path))) return { config: null, path: null };
   const name = basename(path);
@@ -248,8 +351,11 @@ async function loadConfig(dir: string, file: string | undefined): Promise<{ conf
   } catch (error) {
     throw new Error(`can't read ${path}: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
   }
-  const config = extname(name) === ".json" ? vercelConfig(text, name) : headersFileConfig(text, name);
-  return { config, path };
+  if (extname(name) === ".json") {
+    if (host) throw new Error(`--host applies to a _headers file, not to ${name}`);
+    return { config: vercelConfig(text, name), path };
+  }
+  return { config: host === "netlify" ? netlifyHeadersConfig(text, name) : headersFileConfig(text, name), path };
 }
 
 async function htmlFiles(dir: string, prefix = ""): Promise<string[]> {
@@ -285,7 +391,8 @@ async function locate(root: string, pathname: string): Promise<string | undefine
 export async function serveDirectory(dir: string, options: ServeOptions = {}): Promise<ServedSite> {
   const root = resolve(dir);
   if (!(await stat(root).catch(() => undefined))?.isDirectory()) throw new Error(`${dir} is not a folder`);
-  const { config, path } = await loadConfig(dir, options.headers);
+  const { config, path } = await loadConfig(dir, options.headers, options.host);
+  if (options.host && !config) throw new Error(`--host ${options.host} needs a _headers file, and ${dir} has none`);
   const style = config?.style ?? CLOUDFLARE_STYLE;
   const notes = config
     ? [...config.notes]
@@ -300,9 +407,24 @@ export async function serveDirectory(dir: string, options: ServeOptions = {}): P
     const served = await locate(root, decodeURIComponent(page));
     const checked = files.find((file) => served === join(root, file)) ?? files[0]!;
     const skipped = files.filter((file) => file !== checked).join(" and ");
-    notes.push(`${checked} and ${skipped} would both be served at ${page}; only ${checked} is checked`);
+    notes.push(`${checked} and ${skipped} would both be served at ${page}; only ${checked} is checked there`);
   }
-  const pages = [...byPage.keys()].sort((a, b) => (a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)));
+  const pages = [...byPage.keys()];
+  const policyHeaders = (path: string) =>
+    JSON.stringify(
+      (config?.headersFor(path) ?? [])
+        .map(([name, value]) => [name.toLowerCase(), value])
+        .filter(([name]) => POLICY_HEADERS.has(name!))
+        .sort(),
+    );
+  for (const [page, files] of byPage) {
+    for (const other of config?.alternates?.(files[0]!, page) ?? []) {
+      if (pages.includes(other) || policyHeaders(other) === policyHeaders(page)) continue;
+      pages.push(other);
+      notes.push(`${page} is also served at ${other}, with different policy headers, so both are checked`);
+    }
+  }
+  pages.sort((a, b) => (a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)));
   const notFound = join(root, "404.html");
 
   const server = createServer(async (request, response) => {
@@ -318,7 +440,7 @@ export async function serveDirectory(dir: string, options: ServeOptions = {}): P
       const found = pathname === "/_headers" ? undefined : await locate(root, pathname);
       const file = found ?? ((await isFile(notFound)) ? notFound : undefined);
       response.statusCode = found ? 200 : 404;
-      for (const [name, value] of config?.headersFor(rawPath) ?? []) response.setHeader(name, value);
+      for (const [name, value] of config?.headersFor(rawPath) ?? []) if (!headerProblem(name, value)) response.setHeader(name, value);
       response.setHeader("content-type", file ? (CONTENT_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream") : "text/plain; charset=utf-8");
       response.end(request.method === "HEAD" ? undefined : file ? await readFile(file) : "Not found");
     } catch {

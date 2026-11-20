@@ -36,4 +36,4 @@ export {
 } from "./csp.js";
 export { formatBrowserReport, formatReport, formatWorkerReport } from "./format.js";
 export { metaPolicies, type MetaPolicy } from "./page.js";
-export { serveDirectory, type ServedSite, type ServeOptions } from "./serve.js";
+export { serveDirectory, type HeadersFileHost, type ServedSite, type ServeOptions } from "./serve.js";
